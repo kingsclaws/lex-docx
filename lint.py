@@ -54,10 +54,11 @@ class LintResult:
     passed: bool
     detail: str
     locations: list[dict[str, Any]] = field(default_factory=list)
+    severity: str = "error"        # "error" | "warn" | "info"（仅 lint_cfg 模式下有意义）
 
     def __str__(self) -> str:
         icon  = "✅" if self.passed else "❌"
-        lines = [f"{icon} {self.rule}: {self.detail}"]
+        lines = [f"{icon} [{self.severity}] {self.rule}: {self.detail}"]
         for loc in self.locations[:10]:    # 最多显示 10 条
             lines.append(f"   {loc.get('context', '')}")
         if len(self.locations) > 10:
@@ -91,23 +92,26 @@ def check(
     rules: list[str] | None = None,
     config: Any = None,                   # dict 或 DocConfig
     custom_rules: dict[str, Callable] | None = None,
+    lint_cfg: "str | Path | dict | None" = None,  # lint config JSON 路径或已解析 dict
+    profile: str | None = None,           # 显式指定 profile 名
 ) -> list[LintResult]:
     """
     对指定 DOCX 文件执行 lint 规则集。
 
     Args:
         docx_path:    DOCX 文件路径
-        rules:        规则名列表，None = 全部内置规则
-        config:       dict 或 DocConfig 实例
-                      dict 支持键：tc_author, entity_names, common_typos,
-                        forbidden_draft_patterns, note_prefix, check_range,
-                        expected_header_shading, check_tables, min_filled_cells
-                      DocConfig 提供 .to_lint_config() 自动转换
+        rules:        规则名列表，None = 全部内置规则（或 profile 中启用的规则）
+        config:       dict 或 DocConfig 实例（向后兼容）
         custom_rules: {rule_name: fn(doc, config_dict, check_range)} 临时追加规则
+        lint_cfg:     外部 lint config JSON 路径 / dict（Profile + Selector 模式）
+                      提供时启用 severity / gate 功能，优先级高于 config
+        profile:      显式指定 profile 名；None = 自动按 selectors 匹配或取第一个
 
     Returns:
-        List[LintResult]
+        List[LintResult]（lint_cfg 模式下含 severity 字段）
     """
+    from pathlib import Path as _Path
+
     # ── 统一 config 为 dict ──────────────────────────────────────────────── #
     cfg_dict = _normalize_config(config)
 
@@ -115,16 +119,6 @@ def check(
     extra_rules: dict[str, Callable] = {}
     extra_rules.update(cfg_dict.pop("custom_rules", {}) or {})
     extra_rules.update(custom_rules or {})
-
-    # ── 确定规则集 ────────────────────────────────────────────────────────── #
-    if rules is None:
-        rules = list(_BUILTIN_RULES) + list(extra_rules.keys())
-
-    # ── 加载文档 ──────────────────────────────────────────────────────────── #
-    with open(Path(docx_path), "rb") as f:
-        doc = Document(BytesIO(f.read()))
-
-    check_range: tuple[int, int] | None = cfg_dict.get("check_range")
 
     # ── 规则函数映射 ─────────────────────────────────────────────────────── #
     rule_funcs: dict[str, Callable] = {
@@ -144,6 +138,26 @@ def check(
     }
     rule_funcs.update(extra_rules)
 
+    # ── 加载文档 ──────────────────────────────────────────────────────────── #
+    with open(_Path(docx_path), "rb") as f:
+        doc = Document(BytesIO(f.read()))
+
+    # ── lint_cfg 模式 ─────────────────────────────────────────────────────── #
+    if lint_cfg is not None:
+        return _check_with_profile(
+            doc, docx_path=str(docx_path),
+            base_cfg=cfg_dict, rule_funcs=rule_funcs,
+            lint_cfg=lint_cfg, profile_name=profile,
+            extra_rule_names=list(extra_rules.keys()),
+            rules_filter=rules,
+        )
+
+    # ── 经典模式（向后兼容）──────────────────────────────────────────────── #
+    if rules is None:
+        rules = list(_BUILTIN_RULES) + list(extra_rules.keys())
+
+    check_range: tuple[int, int] | None = cfg_dict.get("check_range")
+
     results = []
     for rule in rules:
         fn = rule_funcs.get(rule)
@@ -156,6 +170,70 @@ def check(
             except Exception as e:
                 results.append(LintResult(rule=rule, passed=False,
                                            detail=f"规则执行异常: {e}"))
+    return results
+
+
+def _check_with_profile(
+    doc,
+    docx_path: str,
+    base_cfg: dict,
+    rule_funcs: dict,
+    lint_cfg: "str | Path | dict",
+    profile_name: str | None,
+    extra_rule_names: list[str],
+    rules_filter: list[str] | None,
+) -> list[LintResult]:
+    """lint_cfg 模式：按 ResolvedProfile 运行规则，附加 severity。"""
+    from . import lint_config as lc
+    from pathlib import Path as _Path
+
+    # 加载 raw cfg
+    if isinstance(lint_cfg, dict):
+        raw_cfg = lint_cfg
+    else:
+        raw_cfg = lc.load_file(lint_cfg)
+
+    resolved = lc.resolve(raw_cfg, profile_name=profile_name, doc_path=docx_path)
+
+    # check_range：profile > base_cfg
+    check_range = resolved.check_range or base_cfg.get("check_range")
+
+    # 确定要跑的规则集
+    if rules_filter is not None:
+        rule_names = rules_filter
+    elif resolved.rules:
+        # profile 只跑 enabled=true 的规则
+        rule_names = [n for n, rc in resolved.rules.items() if rc.enabled]
+    else:
+        rule_names = list(_BUILTIN_RULES) + extra_rule_names
+
+    # base_config：resolved.base_config 覆盖到 base_cfg 上
+    merged_base = {**base_cfg, **resolved.base_config}
+
+    results = []
+    for rule in rule_names:
+        fn = rule_funcs.get(rule)
+        rc = resolved.rules.get(rule)
+        severity = rc.severity if rc else "error"
+
+        if fn is None:
+            results.append(LintResult(rule=rule, passed=False,
+                                       detail=f"未知规则: {rule}",
+                                       severity=severity))
+            continue
+
+        # 合并 rule-level overrides
+        rule_cfg = lc.apply_rule_overrides(merged_base, rule, rc.overrides if rc else {})
+        rule_cfg["check_range"] = check_range
+
+        try:
+            r = fn(doc, rule_cfg, check_range)
+            r.severity = severity
+            results.append(r)
+        except Exception as e:
+            results.append(LintResult(rule=rule, passed=False,
+                                       detail=f"规则执行异常: {e}",
+                                       severity=severity))
     return results
 
 

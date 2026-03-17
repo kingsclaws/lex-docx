@@ -73,17 +73,70 @@ def _out(data, fmt: str = "json"):
 def cmd_lint(args):
     """
     lex_docx lint report.docx [--cfg config.json] [--rules rule1,rule2] [--fmt text|json]
+    lex_docx lint report.docx --lint-cfg lint-config.json [--profile dd_report_draft]
     """
     from lex_docx import lint
-    cfg = _load_cfg(args.cfg)
-    rules = args.rules.split(",") if args.rules else None
-    results = lint.check(args.docx, config=cfg, rules=rules)
 
+    cfg        = _load_cfg(args.cfg) if args.cfg else None
+    rules      = args.rules.split(",") if args.rules else None
+    lint_cfg   = args.lint_cfg or None
+    profile    = args.profile or None
+
+    results = lint.check(
+        args.docx,
+        config=cfg,
+        rules=rules,
+        lint_cfg=lint_cfg,
+        profile=profile,
+    )
+
+    # ── lint_cfg 模式：gate 判定 + 增强输出 ──────────────────────────────── #
+    if lint_cfg:
+        from lex_docx import lint_config as lc
+        raw_cfg = lc.load_file(lint_cfg) if not isinstance(lint_cfg, dict) else lint_cfg
+        resolved = lc.resolve(raw_cfg, profile_name=profile, doc_path=args.docx)
+        gate_result = lc.gate_check(results, resolved.gate)
+
+        if args.fmt == "json":
+            _out({
+                "profile":  resolved.name,
+                "gate":     gate_result["gate"],
+                "summary":  gate_result["summary"],
+                "fail_reasons": gate_result["fail_reasons"],
+                "results": [{
+                    "rule":      r.rule,
+                    "severity":  r.severity,
+                    "passed":    r.passed,
+                    "detail":    r.detail,
+                    "locations": r.locations,
+                } for r in results],
+            })
+        else:
+            gate_icon = "✅ PASS" if gate_result["gate"] == "PASS" else "❌ FAIL"
+            print(f"Profile: {resolved.name}  Gate: {gate_icon}")
+            s = gate_result["summary"]
+            print(f"Summary: error={s['error']} warn={s['warn']} info={s.get('info',0)}")
+            if gate_result["fail_reasons"]:
+                for reason in gate_result["fail_reasons"]:
+                    print(f"  ⛔ {reason}")
+            print()
+            for r in results:
+                sev_tag = {"error": "🔴", "warn": "🟡", "info": "🔵"}.get(r.severity, "⚪")
+                icon = "✅" if r.passed else f"❌{sev_tag}"
+                print(f"{icon} {r.rule}: {r.detail}")
+                for loc in r.locations[:5]:
+                    print(f"    → {loc.get('context', loc)}")
+                if len(r.locations) > 5:
+                    print(f"    … 共 {len(r.locations)} 处")
+            sys.exit(0 if gate_result["gate"] == "PASS" else 1)
+        return
+
+    # ── 经典模式（向后兼容）──────────────────────────────────────────────── #
     if args.fmt == "json":
         _out([{
-            "rule": r.rule,
-            "passed": r.passed,
-            "detail": r.detail,
+            "rule":      r.rule,
+            "passed":    r.passed,
+            "detail":    r.detail,
             "locations": r.locations,
         } for r in results])
     else:
@@ -503,9 +556,12 @@ def main():
     # ── lint ──────────────────────────────────────────────────────────────── #
     p = sub.add_parser("lint", help="检查 DOCX 格式")
     p.add_argument("docx")
-    p.add_argument("--cfg", help="DocConfig JSON 文件路径")
+    p.add_argument("--cfg", help="DocConfig JSON 文件路径（经典模式）")
     p.add_argument("--rules", help="逗号分隔的规则名，默认全部")
     p.add_argument("--fmt", choices=["text", "json"], default="text")
+    p.add_argument("--lint-cfg", dest="lint_cfg",
+                   help="Lint Config JSON 路径（Profile + Selector 模式）")
+    p.add_argument("--profile", help="指定 profile 名；不指定则按 selectors 自动匹配")
 
     # ── extract ───────────────────────────────────────────────────────────── #
     p = sub.add_parser("extract", help="提取表格数据")
