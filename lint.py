@@ -519,17 +519,27 @@ def _check_defined_terms_bold(doc, config, check_range) -> LintResult:
 def _check_table_header_format(doc, config, check_range) -> LintResult:
     """
     检查表格标题行（默认 row 0）是否有底色或加粗。
+    支持 table_style_map：no_format / kv_info 类型的表格跳过检查。
     check_tables=[0,1,2] 可限定检查哪些表格；None = 全部。
     expected_header_shading 若指定，则精确匹配颜色值。
     """
     check_tables      = config.get("check_tables")
     expected_shading  = (config.get("expected_header_shading") or "").upper().lstrip("#")
     header_row_idx    = config.get("header_row_index", 0)
+    table_style_map   = config.get("table_style_map") or {}
     failures = []
 
     for ti, table in enumerate(doc.tables):
         if check_tables is not None and ti not in check_tables:
             continue
+
+        # 按 table_style_map 跳过不需要检查标题行的类型
+        if table_style_map:
+            from . import lint_config as _lc
+            style_name = _lc.resolve_table_style(table_style_map, ti)
+            if style_name in ("no_format", "kv_info", "banded_rows"):
+                continue
+
         if len(table.rows) <= header_row_idx:
             continue
         header_row = table.rows[header_row_idx]
@@ -568,13 +578,27 @@ def _check_table_header_format(doc, config, check_range) -> LintResult:
 
 
 def _check_table_borders(doc, config, check_range) -> LintResult:
-    """检查表格是否配置了边框（任意非 none 边框视为通过）。"""
-    check_tables = config.get("check_tables")
+    """
+    检查表格是否配置了边框（任意非 none 边框视为通过）。
+    支持 table_style_map：no_format 类型跳过，banded_rows 只检查外边框。
+    """
+    check_tables    = config.get("check_tables")
+    table_style_map = config.get("table_style_map") or {}
     failures = []
 
     for ti, table in enumerate(doc.tables):
         if check_tables is not None and ti not in check_tables:
             continue
+
+        # 按样式决定检查模式
+        border_mode = "any"   # "any" | "outer_only" | "none_expected"
+        if table_style_map:
+            from . import lint_config as _lc
+            style_name = _lc.resolve_table_style(table_style_map, ti)
+            if style_name == "no_format":
+                continue   # 无框表，不检查
+            elif style_name == "banded_rows":
+                border_mode = "outer_only"
         tblPr   = table._tbl.find(qn("w:tblPr"))
         borders = tblPr.find(qn("w:tblBorders")) if tblPr is not None else None
 
@@ -582,9 +606,13 @@ def _check_table_borders(doc, config, check_range) -> LintResult:
             failures.append({"index": None, "context": f"T{ti}: 无 tblBorders"})
             continue
 
+        outer_sides = ("top", "left", "bottom", "right")
+        check_sides = outer_sides if border_mode == "outer_only" else (
+            outer_sides + ("insideH", "insideV")
+        )
         has_real = any(
             el.get(qn("w:val"), "none") not in ("none", "nil")
-            for side in ("top", "left", "bottom", "right", "insideH", "insideV")
+            for side in check_sides
             for el in [borders.find(qn(f"w:{side}"))]
             if el is not None
         )
@@ -612,6 +640,10 @@ def _check_table_data_not_empty(doc, config, check_range) -> LintResult:
             continue
         data_rows = table.rows[header_row_idx + 1:]
         for ri, row in enumerate(data_rows, start=header_row_idx + 1):
+            # 跳过已被 TC DEL 标记的行（trPr > w:del）
+            trPr = row._tr.find(qn("w:trPr"))
+            if trPr is not None and trPr.find(qn("w:del")) is not None:
+                continue
             filled = sum(1 for c in row.cells
                          if "".join(t.text or "" for t in c._tc.iter(qn("w:t"))).strip())
             if filled < min_filled:

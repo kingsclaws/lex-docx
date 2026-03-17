@@ -252,6 +252,75 @@ def gate_check(results: list, gate: Gate) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# table_style_map 解析辅助（Issue #2 P0）                                       #
+# --------------------------------------------------------------------------- #
+
+def resolve_table_style(table_style_map: dict, table_index: int) -> str | None:
+    """
+    按 table_style_map 返回指定表格的样式名。
+
+    table_style_map 支持：
+      {"0": "no_format", "1": "kv_info", "3-8": "standard_data", "default": "standard_data"}
+
+    优先级：精确 index > 范围 > "default"
+    """
+    if not table_style_map:
+        return None
+
+    idx_str = str(table_index)
+
+    # 精确匹配
+    if idx_str in table_style_map:
+        return table_style_map[idx_str]
+
+    # 范围匹配（"3-8" 格式）
+    for key, style in table_style_map.items():
+        if "-" in key:
+            parts = key.split("-", 1)
+            try:
+                lo, hi = int(parts[0]), int(parts[1])
+                if lo <= table_index <= hi:
+                    return style
+            except ValueError:
+                pass
+
+    return table_style_map.get("default")
+
+
+# 内置样式定义（可在 lint-config.json 的 "table_styles" 中覆盖）
+_BUILTIN_TABLE_STYLES: dict[str, dict] = {
+    "standard_data": {
+        "header": "top_row",
+        "header_shading": None,     # 不为空即可（不精确匹配颜色）
+        "borders": "any",
+        "data_shading": "none",
+    },
+    "kv_info": {
+        "header": "left_column",
+        "header_shading": None,
+        "borders": "any",
+        "data_shading": "none",
+    },
+    "banded_rows": {
+        "header": "top_row_or_none",
+        "borders": "outer_only_or_any",
+        "data_shading": "alternating",
+    },
+    "no_format": {
+        "header": "none",
+        "borders": "none",
+        "data_shading": "none",
+    },
+}
+
+
+def get_table_style_def(raw_cfg: dict, style_name: str) -> dict:
+    """从 raw_cfg["table_styles"] 或内置定义获取样式 dict。"""
+    user_styles = raw_cfg.get("table_styles", {})
+    return user_styles.get(style_name) or _BUILTIN_TABLE_STYLES.get(style_name) or {}
+
+
+# --------------------------------------------------------------------------- #
 # 规则级 config 合并辅助                                                         #
 # --------------------------------------------------------------------------- #
 

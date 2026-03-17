@@ -927,3 +927,375 @@ def _insert_table_at(dst_doc, new_tbl_el, dst_position: str,
     else:
         raise ValueError(f"未知 dst_position 格式: {dst_position!r}"
                          f"（支持 'after_para:N' 或 'replace_table:N'）")
+
+
+# =========================================================================== #
+# inspect_table  (Issue #4 FR-1)                                               #
+# =========================================================================== #
+
+def inspect_table(
+    doc_or_path,
+    table_index: int | None = None,
+    near_text: str | None = None,
+) -> dict:
+    """
+    读取指定表格的完整格式信息，返回 JSON-friendly dict。
+
+    Args:
+        doc_or_path:  Document 对象或 DOCX 文件路径
+        table_index:  表格序号（0-based）
+        near_text:    按临近段落文字定位（与 table_index 互斥）
+
+    Returns:
+        {
+          "table_index": N,
+          "rows": N, "cols": N,
+          "col_widths_dxa": [...],
+          "col_aligns": [...],
+          "borders": {"top": "single/4/000000", ...},
+          "header_row": {"shading": "BFBFBF", "bold": True, "font": "...", "font_size": "12pt"},
+          "data_rows": {"shading_pattern": "none"|"alternating", "font": "...", "font_size": "..."},
+          "detected_style": "standard_data"|"kv_info"|"banded_rows"|"no_format"|"mixed"
+        }
+    """
+    if isinstance(doc_or_path, (str, Path)):
+        with open(doc_or_path, "rb") as f:
+            doc = Document(BytesIO(f.read()))
+    else:
+        doc = doc_or_path
+
+    if near_text:
+        tbl = _find_table_near_text(doc, near_text, None)
+        if tbl is None:
+            raise ValueError(f"找不到临近 {near_text!r} 的表格")
+        table_index = doc.tables.index(tbl)
+    elif table_index is None:
+        raise ValueError("需要 table_index 或 near_text")
+
+    table = doc.tables[table_index]
+    tbl_el = table._tbl
+    rows   = table.rows
+    n_rows = len(rows)
+    n_cols = len(rows[0].cells) if rows else 0
+
+    # ── 列宽（tblGrid） ───────────────────────────────────────────────────── #
+    grid = tbl_el.find(qn("w:tblGrid"))
+    col_widths = []
+    if grid is not None:
+        for gc in grid.findall(qn("w:gridCol")):
+            w = gc.get(qn("w:w"))
+            col_widths.append(int(w) if w else 0)
+
+    # ── 列对齐（取第一个数据行各列段落的 jc） ─────────────────────────────── #
+    col_aligns = []
+    if n_rows > 1 and rows[1].cells:
+        for cell in rows[1].cells:
+            jc = None
+            for para in cell.paragraphs:
+                pPr = para._element.find(qn("w:pPr"))
+                jc_el = pPr.find(qn("w:jc")) if pPr is not None else None
+                if jc_el is not None:
+                    jc = jc_el.get(qn("w:val"), "left")
+                    break
+            col_aligns.append(jc or "left")
+
+    # ── 表格边框 ──────────────────────────────────────────────────────────── #
+    borders_info: dict[str, str] = {}
+    tblPr = tbl_el.find(qn("w:tblPr"))
+    if tblPr is not None:
+        tblBorders = tblPr.find(qn("w:tblBorders"))
+        if tblBorders is not None:
+            for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
+                el = tblBorders.find(qn(f"w:{side}"))
+                if el is not None:
+                    val   = el.get(qn("w:val"), "none")
+                    sz    = el.get(qn("w:sz"), "0")
+                    color = el.get(qn("w:color"), "auto")
+                    borders_info[side] = f"{val}/{sz}/{color}"
+
+    # ── 单行格式提取辅助 ──────────────────────────────────────────────────── #
+    def _row_shading(row) -> str | None:
+        """取该行第一个有底色的单元格的 fill 值。"""
+        for cell in row.cells:
+            tcPr = cell._tc.find(qn("w:tcPr"))
+            shd  = tcPr.find(qn("w:shd")) if tcPr is not None else None
+            if shd is not None:
+                fill = shd.get(qn("w:fill"), "").upper()
+                if fill not in ("", "AUTO", "FFFFFF"):
+                    return fill
+        return None
+
+    def _row_font_info(row) -> dict:
+        """取该行第一个有内容 run 的字体/字号/加粗信息。"""
+        info: dict = {}
+        for cell in row.cells:
+            for para in cell.paragraphs:
+                for run_el in para._element.findall(qn("w:r")):
+                    rPr = run_el.find(qn("w:rPr"))
+                    if rPr is None:
+                        continue
+                    rFonts = rPr.find(qn("w:rFonts"))
+                    if rFonts is not None:
+                        ea = rFonts.get(qn("w:eastAsia"))
+                        if ea:
+                            info["font"] = ea
+                    sz_el = rPr.find(qn("w:sz"))
+                    if sz_el is not None:
+                        half_pt = sz_el.get(qn("w:val"), "")
+                        if half_pt:
+                            info["font_size"] = f"{int(half_pt) // 2}pt"
+                    info["bold"] = (rPr.find(qn("w:b")) is not None
+                                    or rPr.find(qn("w:bCs")) is not None)
+                    if info:
+                        return info
+        return info
+
+    # ── 标题行信息 ────────────────────────────────────────────────────────── #
+    header_info: dict = {}
+    if rows:
+        h_shading = _row_shading(rows[0])
+        header_info["shading"] = h_shading or "none"
+        header_info.update(_row_font_info(rows[0]))
+
+    # ── 数据行信息 ────────────────────────────────────────────────────────── #
+    data_info: dict = {"shading_pattern": "none"}
+    data_rows = rows[1:] if n_rows > 1 else []
+    if data_rows:
+        shadings = [_row_shading(r) for r in data_rows]
+        non_none = [s for s in shadings if s]
+        if non_none:
+            unique = set(non_none)
+            if len(unique) <= 2 and len(non_none) > 1:
+                # 检查是否交替
+                pairs = list(zip(shadings, shadings[1:]))
+                alternating = all(a != b for a, b in pairs if a and b)
+                data_info["shading_pattern"] = "alternating" if alternating else "mixed"
+                data_info["band_colors"] = sorted(unique)
+            else:
+                data_info["shading_pattern"] = "uniform"
+                data_info["shading"] = non_none[0]
+        data_info.update(_row_font_info(data_rows[0]))
+
+    # ── 自动识别表格类型 ──────────────────────────────────────────────────── #
+    detected = _detect_table_style(rows, header_info, data_info, borders_info)
+
+    return {
+        "table_index":   table_index,
+        "rows":          n_rows,
+        "cols":          n_cols,
+        "col_widths_dxa": col_widths,
+        "col_aligns":    col_aligns,
+        "borders":       borders_info,
+        "header_row":    header_info,
+        "data_rows":     data_info,
+        "detected_style": detected,
+    }
+
+
+def _detect_table_style(rows, header_info: dict, data_info: dict,
+                         borders_info: dict) -> str:
+    """启发式识别表格样式类型。"""
+    has_borders = any(
+        v.split("/")[0] not in ("none", "nil", "")
+        for v in borders_info.values()
+    ) if borders_info else False
+
+    header_shading = header_info.get("shading", "none") != "none"
+
+    # 检查第一列是否有底色（KV 表特征）
+    first_col_shaded = False
+    if len(rows) > 1:
+        shaded_count = 0
+        for row in rows[1:]:
+            if row.cells:
+                tcPr = row.cells[0]._tc.find(qn("w:tcPr"))
+                shd  = tcPr.find(qn("w:shd")) if tcPr is not None else None
+                if shd is not None:
+                    fill = shd.get(qn("w:fill"), "").upper()
+                    if fill not in ("", "AUTO", "FFFFFF"):
+                        shaded_count += 1
+        first_col_shaded = shaded_count > len(rows) // 2
+
+    if not has_borders and header_info.get("shading", "none") == "none":
+        return "no_format"
+    if data_info.get("shading_pattern") == "alternating":
+        return "banded_rows"
+    if first_col_shaded and not header_shading:
+        return "kv_info"
+    if header_shading:
+        return "standard_data"
+    return "mixed"
+
+
+# =========================================================================== #
+# table_format_brush  (Issue #4 FR-2)                                          #
+# =========================================================================== #
+
+def table_format_brush(
+    ref_doc_or_path,
+    ref_table_index: int,
+    dst_doc,
+    dst_table_index: int,
+    copy: list[str] | None = None,
+) -> dict:
+    """
+    从参考表格复制格式到目标表格，处理行数不同的情况。
+
+    支持同文档（ref_doc_or_path == dst_doc）和跨文档。
+
+    Args:
+        ref_doc_or_path:  参考文档（Document 对象或路径）
+        ref_table_index:  参考表格序号
+        dst_doc:          目标文档 Document 对象
+        dst_table_index:  目标表格序号
+        copy:             复制项列表，None = 全部
+                          可选：shading, borders, col_widths, col_aligns, font, row_height
+
+    Returns:
+        {"copied": [...applied copy items...]}
+    """
+    COPY_ALL = ["shading", "borders", "col_widths", "col_aligns", "font", "row_height"]
+    copy_items = set(copy) if copy else set(COPY_ALL)
+
+    # 加载参考文档
+    if isinstance(ref_doc_or_path, (str, Path)):
+        with open(ref_doc_or_path, "rb") as f:
+            ref_doc = Document(BytesIO(f.read()))
+    else:
+        ref_doc = ref_doc_or_path
+
+    ref_table = ref_doc.tables[ref_table_index]
+    dst_table = dst_doc.tables[dst_table_index]
+    ref_rows  = ref_table.rows
+    dst_rows  = dst_table.rows
+
+    applied = []
+
+    # ── 边框 ─────────────────────────────────────────────────────────────── #
+    if "borders" in copy_items:
+        src_tblPr = ref_table._tbl.find(qn("w:tblPr"))
+        dst_tblPr = dst_table._tbl.find(qn("w:tblPr"))
+        if dst_tblPr is None:
+            dst_tblPr = OxmlElement("w:tblPr")
+            dst_table._tbl.insert(0, dst_tblPr)
+        if src_tblPr is not None:
+            src_borders = src_tblPr.find(qn("w:tblBorders"))
+            if src_borders is not None:
+                ex = dst_tblPr.find(qn("w:tblBorders"))
+                if ex is not None:
+                    dst_tblPr.remove(ex)
+                dst_tblPr.append(deepcopy(src_borders))
+                applied.append("borders")
+
+    # ── 列宽 ─────────────────────────────────────────────────────────────── #
+    if "col_widths" in copy_items:
+        src_grid = ref_table._tbl.find(qn("w:tblGrid"))
+        dst_grid = dst_table._tbl.find(qn("w:tblGrid"))
+        if src_grid is not None and dst_grid is not None:
+            src_cols = src_grid.findall(qn("w:gridCol"))
+            dst_cols = dst_grid.findall(qn("w:gridCol"))
+            for i, dst_gc in enumerate(dst_cols):
+                if i < len(src_cols):
+                    w = src_cols[i].get(qn("w:w"))
+                    if w:
+                        dst_gc.set(qn("w:w"), w)
+            applied.append("col_widths")
+
+    # ── 各行格式 ─────────────────────────────────────────────────────────── #
+    # 参考：row 0 = 标题行，row 1+ = 数据行（若 ref 只有 1 行则以 row 0 作数据样本）
+    ref_header_row = ref_rows[0] if ref_rows else None
+    ref_data_row   = ref_rows[1] if len(ref_rows) > 1 else ref_header_row
+
+    for di, dst_row in enumerate(dst_rows):
+        # 选取对应参考行（超出范围的数据行复用最后一个数据样本）
+        if di == 0:
+            ref_row = ref_header_row
+        elif di < len(ref_rows):
+            ref_row = ref_rows[di]
+        else:
+            ref_row = ref_data_row   # 目标行比参考多，用数据行样式填充
+
+        if ref_row is None:
+            continue
+
+        # trPr（行高）
+        if "row_height" in copy_items:
+            src_trPr = ref_row._tr.find(qn("w:trPr"))
+            if src_trPr is not None:
+                src_trH = src_trPr.find(qn("w:trHeight"))
+                if src_trH is not None:
+                    dst_trPr = dst_row._tr.find(qn("w:trPr"))
+                    if dst_trPr is None:
+                        dst_trPr = OxmlElement("w:trPr")
+                        dst_row._tr.insert(0, dst_trPr)
+                    ex = dst_trPr.find(qn("w:trHeight"))
+                    if ex is not None:
+                        dst_trPr.remove(ex)
+                    dst_trPr.append(deepcopy(src_trH))
+
+        # 逐单元格
+        src_cells = ref_row.cells
+        dst_cells = dst_row.cells
+        for ci, dst_cell in enumerate(dst_cells):
+            src_cell = src_cells[ci] if ci < len(src_cells) else (
+                src_cells[-1] if src_cells else None
+            )
+            if src_cell is None:
+                continue
+
+            # tcPr（底色）
+            if "shading" in copy_items:
+                src_tcPr = src_cell._tc.find(qn("w:tcPr"))
+                dst_tcPr = dst_cell._tc.find(qn("w:tcPr"))
+                if dst_tcPr is None:
+                    dst_tcPr = OxmlElement("w:tcPr")
+                    dst_cell._tc.insert(0, dst_tcPr)
+                if src_tcPr is not None:
+                    src_shd = src_tcPr.find(qn("w:shd"))
+                    if src_shd is not None:
+                        ex = dst_tcPr.find(qn("w:shd"))
+                        if ex is not None:
+                            dst_tcPr.remove(ex)
+                        dst_tcPr.append(deepcopy(src_shd))
+
+            # pPr 对齐 + run rPr（字体/字号/加粗）
+            src_paras = src_cell.paragraphs
+            for pi, dst_p in enumerate(dst_cell.paragraphs):
+                src_p = src_paras[pi] if pi < len(src_paras) else (
+                    src_paras[-1] if src_paras else None
+                )
+                if src_p is None:
+                    continue
+
+                dst_pPr = dst_p._element.get_or_add_pPr()
+                src_pPr = src_p._element.find(qn("w:pPr"))
+
+                if "col_aligns" in copy_items and src_pPr is not None:
+                    src_jc = src_pPr.find(qn("w:jc"))
+                    if src_jc is not None:
+                        ex = dst_pPr.find(qn("w:jc"))
+                        if ex is not None:
+                            dst_pPr.remove(ex)
+                        dst_pPr.append(deepcopy(src_jc))
+
+                if "font" in copy_items:
+                    src_runs = src_p._element.findall(qn("w:r"))
+                    if src_runs:
+                        src_rPr = src_runs[0].find(qn("w:rPr"))
+                        if src_rPr is not None:
+                            for dst_r in dst_p._element.findall(qn("w:r")):
+                                ex = dst_r.find(qn("w:rPr"))
+                                if ex is not None:
+                                    dst_r.remove(ex)
+                                dst_r.insert(0, deepcopy(src_rPr))
+
+    if "row_height" in copy_items:
+        applied.append("row_height")
+    if "shading" in copy_items:
+        applied.append("shading")
+    if "col_aligns" in copy_items:
+        applied.append("col_aligns")
+    if "font" in copy_items:
+        applied.append("font")
+
+    return {"copied": applied}

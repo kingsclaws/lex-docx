@@ -342,6 +342,54 @@ def cmd_copy_table(args):
     print(f"ok: table copied → {args.out or args.dst_docx}")
 
 
+def cmd_table_inspect(args):
+    """
+    lex_docx table-inspect report.docx --table 5 [--fmt json|text]
+    """
+    from lex_docx import table_ops
+    kwargs = {}
+    if args.near:
+        kwargs["near_text"] = args.near
+    else:
+        kwargs["table_index"] = args.table
+    result = table_ops.inspect_table(args.docx, **kwargs)
+    if args.fmt == "text":
+        t = result
+        print(f"Table {t['table_index']}: {t['rows']}行 × {t['cols']}列  [{t['detected_style']}]")
+        print(f"  列宽(dxa): {t['col_widths_dxa']}")
+        print(f"  列对齐:    {t['col_aligns']}")
+        print(f"  边框: {t['borders']}")
+        print(f"  标题行: {t['header_row']}")
+        print(f"  数据行: {t['data_rows']}")
+    else:
+        _out(result)
+
+
+def cmd_table_format_brush(args):
+    """
+    lex_docx table-format-brush report.docx --ref-table 5 --target-table 12 --out out.docx
+    lex_docx table-format-brush template.docx --ref-table 3 report.docx --target-table 12 --out out.docx
+    """
+    from lex_docx import table_ops
+
+    # 单文档 vs 跨文档
+    if args.target_docx:
+        ref_src  = args.docx
+        dst_doc  = _load_doc(args.target_docx)
+        out_path = args.out or args.target_docx
+    else:
+        dst_doc  = _load_doc(args.docx)
+        ref_src  = dst_doc
+        out_path = args.out or args.docx
+
+    copy = args.copy.split(",") if args.copy else None
+    result = table_ops.table_format_brush(
+        ref_src, args.ref_table, dst_doc, args.target_table, copy=copy
+    )
+    _save_doc(dst_doc, out_path)
+    _out({"ok": True, **result})
+
+
 def cmd_tc_insert(args):
     """
     lex_docx tc-insert report.docx --para 180 --text "新增文字"
@@ -633,6 +681,24 @@ def main():
     p.add_argument("--cfg")
     p.add_argument("--out", help="输出路径，默认覆盖 dst_docx")
 
+    # ── table-inspect ─────────────────────────────────────────────────────── #
+    p = sub.add_parser("table-inspect", help="读取表格完整格式信息（底色/边框/列宽/字体）")
+    p.add_argument("docx")
+    p.add_argument("--table", type=int, help="表格序号（0-based）")
+    p.add_argument("--near",  help="按临近文字定位表格")
+    p.add_argument("--fmt", choices=["json", "text"], default="json")
+
+    # ── table-format-brush ────────────────────────────────────────────────── #
+    p = sub.add_parser("table-format-brush", help="表格格式刷（从参考表格复制格式到目标表格）")
+    p.add_argument("docx", help="参考文档（单文档模式时也是目标文档）")
+    p.add_argument("target_docx", nargs="?", help="目标文档（跨文档模式时指定）")
+    p.add_argument("--ref-table",    dest="ref_table",    type=int, required=True,
+                   help="参考表格序号")
+    p.add_argument("--target-table", dest="target_table", type=int, required=True,
+                   help="目标表格序号")
+    p.add_argument("--copy", help="复制项，逗号分隔：shading,borders,col_widths,col_aligns,font,row_height")
+    p.add_argument("--out")
+
     # ── tc-insert ─────────────────────────────────────────────────────────── #
     p = sub.add_parser("tc-insert", help="段落级 TC INS（在指定段落插入文字）")
     p.add_argument("docx")
@@ -689,6 +755,8 @@ def main():
         "cleanup":      cmd_cleanup,
         "bold-terms":   cmd_bold_terms,
         "copy-table":   cmd_copy_table,
+        "table-inspect":       cmd_table_inspect,
+        "table-format-brush":  cmd_table_format_brush,
         "tc-insert":    cmd_tc_insert,
         "tc-delete":    cmd_tc_delete,
         "highlight":    cmd_highlight,
