@@ -16,6 +16,7 @@
 name: Notify OpenClaw
 
 on:
+  workflow_dispatch:
   issues:
     types: [opened, edited, closed, reopened]
   issue_comment:
