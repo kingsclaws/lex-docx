@@ -25,6 +25,9 @@ Commands:
   ── 段落/Track Changes ─────────────────────────────────────────────────────────
     tc-insert           段落级 TC INS（在指定段落插入文字）
     tc-delete           段落级 TC DEL（将指定段落标记为删除）
+    tc-list             列出文档中所有 Track Changes（w:ins / w:del）
+    tc-accept           接受所有（或指定作者的）Track Changes
+    tc-reject           拒绝所有（或指定作者的）Track Changes
     highlight           批量高亮段落范围
     format-brush        格式刷（从参考段落复制格式到目标段落）
     set-outline-level   设置段落大纲级别（w:outlineLvl，独立于 Heading 样式）
@@ -33,10 +36,13 @@ Commands:
   ── 文档维护 ───────────────────────────────────────────────────────────────────
     cleanup             清理空段落 / 孤儿编号
     bold-terms          加粗定义术语
+    comment-clean       删除所有批注（commentRange* + commentReference runs + comments.xml）
+    header-clean        清除所有 header 内容（可选：移除 headerReference 引用）
     footer-audit        审查所有 footer OPC parts（rId/类型/文本/textbox）
     doctor check        格式诊断（字体/编号/大纲/样式引用/TOC/footer，只读）
     doctor fix          自动修复（D01/D02/D04/D05/D07/D08，支持 --dry-run）
     inject              读取 JSON 计划文件一键执行注入
+    clean               执行版一键清理（accept/reject TC + 批注 + header，支持 --dry-run）
 """
 from __future__ import annotations
 
@@ -805,6 +811,207 @@ def cmd_fill_footer(args):
 
 
 # =========================================================================== #
+# tc-list / tc-accept / tc-reject                                              #
+# =========================================================================== #
+
+def cmd_tc_list(args):
+    """
+    lex_docx tc-list report.docx [--author "JT"] [--fmt json|text]
+    """
+    from lex_docx import tc_ops
+    doc = _load_doc(args.docx)
+    items = tc_ops.list_tc(doc, author_filter=args.author or None)
+
+    if args.fmt == "text":
+        for item in items:
+            lvl = f"[{item['level']}]"
+            txt = repr(item["text"])[:60] if item["text"] else ""
+            print(f"id={item['id']:>4} {item['type']:3s} {lvl:11s} author={item['author']!r:16s} {txt}")
+        print(f"Total: {len(items)}")
+    else:
+        _out({"total": len(items), "items": items})
+
+
+def cmd_tc_accept(args):
+    """
+    lex_docx tc-accept report.docx [--author "JT"] [--out out.docx] [--dry-run]
+    """
+    from lex_docx import tc_ops
+    doc = _load_doc(args.docx)
+
+    if args.dry_run:
+        items = tc_ops.list_tc(doc, author_filter=args.author or None)
+        _out({"dry_run": True, "would_accept": len(items), "items": items})
+        return
+
+    stats = tc_ops.accept_all(doc, author_filter=args.author or None)
+    _save_doc(doc, args.out or args.docx)
+    _out({"ok": True, **stats})
+
+
+def cmd_tc_reject(args):
+    """
+    lex_docx tc-reject report.docx [--author "JT"] [--out out.docx] [--dry-run]
+    """
+    from lex_docx import tc_ops
+    doc = _load_doc(args.docx)
+
+    if args.dry_run:
+        items = tc_ops.list_tc(doc, author_filter=args.author or None)
+        _out({"dry_run": True, "would_reject": len(items), "items": items})
+        return
+
+    stats = tc_ops.reject_all(doc, author_filter=args.author or None)
+    _save_doc(doc, args.out or args.docx)
+    _out({"ok": True, **stats})
+
+
+# =========================================================================== #
+# comment-clean / header-clean                                                 #
+# =========================================================================== #
+
+def cmd_comment_clean(args):
+    """
+    lex_docx comment-clean report.docx [--out out.docx] [--dry-run]
+    """
+    from lex_docx import tc_ops
+    doc = _load_doc(args.docx)
+
+    if args.dry_run:
+        # Count comment markers without modifying
+        from docx.oxml.ns import qn
+        body = doc.element.body
+        n_starts = sum(1 for _ in body.iter(qn("w:commentRangeStart")))
+        n_ends = sum(1 for _ in body.iter(qn("w:commentRangeEnd")))
+        _out({"dry_run": True, "range_starts": n_starts, "range_ends": n_ends})
+        return
+
+    stats = tc_ops.clean_comments(doc)
+    _save_doc(doc, args.out or args.docx)
+    _out({"ok": True, **stats})
+
+
+def cmd_header_clean(args):
+    """
+    lex_docx header-clean report.docx [--remove-refs] [--out out.docx] [--dry-run]
+    """
+    from lex_docx import tc_ops
+    doc = _load_doc(args.docx)
+
+    if args.dry_run:
+        count = sum(
+            1 for rel in doc.part.rels.values()
+            if tc_ops._HEADERS_REL in rel.reltype
+        )
+        _out({"dry_run": True, "header_parts_found": count})
+        return
+
+    stats = tc_ops.clean_headers(
+        doc,
+        clear_text=True,
+        remove_refs=args.remove_refs,
+    )
+    _save_doc(doc, args.out or args.docx)
+    _out({"ok": True, **stats})
+
+
+# =========================================================================== #
+# clean  (issue #28 — execution-version workflow)                              #
+# =========================================================================== #
+
+def cmd_clean(args):
+    """
+    lex_docx clean report.docx [--accept|--reject] [--author "JT"]
+                [--keep-comments] [--keep-headers]
+                [--dry-run] [--backup] [--yes] [--out out.docx]
+
+    Orchestrated execution-version cleanup:
+      1. Accept or reject all Track Changes  (default: accept)
+      2. Remove all comments
+      3. Clear all header content
+
+    Use --dry-run to preview without modifying the file.
+    Use --backup to create a .bak copy before modifying.
+    Use --yes to skip interactive confirmation.
+    """
+    import shutil
+    from lex_docx import tc_ops
+
+    docx_path = args.docx
+    out_path = args.out or docx_path
+
+    tc_mode = "reject" if args.reject else "accept"
+    author_filter = args.author or None
+    do_comments = not args.keep_comments
+    do_headers = not args.keep_headers
+
+    # ── Dry-run: report and exit ──────────────────────────────────────── #
+    if args.dry_run:
+        doc = _load_doc(docx_path)
+        tc_items = tc_ops.list_tc(doc, author_filter=author_filter)
+        from docx.oxml.ns import qn
+        body = doc.element.body
+        n_comments = sum(1 for _ in body.iter(qn("w:commentRangeStart")))
+        hdr_count = sum(
+            1 for rel in doc.part.rels.values()
+            if tc_ops._HEADERS_REL in rel.reltype
+        )
+        plan = {
+            "dry_run": True,
+            "tc_mode": tc_mode,
+            "author_filter": author_filter,
+            "tc_changes_found": len(tc_items),
+            "comment_ranges_found": n_comments,
+            "header_parts_found": hdr_count,
+            "do_comments": do_comments,
+            "do_headers": do_headers,
+        }
+        _out(plan)
+        return
+
+    # ── Interactive confirmation ──────────────────────────────────────── #
+    if not args.yes:
+        actions = [f"  • {tc_mode.upper()} all Track Changes"]
+        if do_comments:
+            actions.append("  • Remove all comments")
+        if do_headers:
+            actions.append("  • Clear all headers")
+        print(f"Document: {docx_path}", file=sys.stderr)
+        print("Actions to perform:", file=sys.stderr)
+        for a in actions:
+            print(a, file=sys.stderr)
+        print(f"Output  : {out_path}", file=sys.stderr)
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted.", file=sys.stderr)
+            sys.exit(0)
+
+    # ── Backup ────────────────────────────────────────────────────────── #
+    if args.backup:
+        bak_path = docx_path + ".bak"
+        shutil.copy2(docx_path, bak_path)
+        print(f"backup  → {bak_path}", file=sys.stderr)
+
+    # ── Execute ───────────────────────────────────────────────────────── #
+    doc = _load_doc(docx_path)
+    result: dict = {"ok": True, "tc_mode": tc_mode}
+
+    if tc_mode == "accept":
+        result["tc"] = tc_ops.accept_all(doc, author_filter=author_filter)
+    else:
+        result["tc"] = tc_ops.reject_all(doc, author_filter=author_filter)
+
+    if do_comments:
+        result["comments"] = tc_ops.clean_comments(doc)
+
+    if do_headers:
+        result["headers"] = tc_ops.clean_headers(doc)
+
+    _save_doc(doc, out_path)
+    _out(result)
+
+
+# =========================================================================== #
 # main                                                                         #
 # =========================================================================== #
 
@@ -837,6 +1044,9 @@ Commands:
   ── 段落 / Track Changes ────────────────────────────────────────────────────
   tc-insert           段落级 TC INS（在指定段落插入带标记文字）
   tc-delete           段落级 TC DEL（将指定段落标记为删除）
+  tc-list             列出文档所有 Track Changes（w:ins / w:del）
+  tc-accept           接受所有（或指定作者的）Track Changes
+  tc-reject           拒绝所有（或指定作者的）Track Changes
   highlight           批量高亮段落范围
   format-brush        段落格式刷（复制缩进/间距/样式/大纲级别等）
   set-outline-level   设置段落大纲级别（w:outlineLvl，独立于 Heading 样式）
@@ -845,8 +1055,11 @@ Commands:
   ── 文档维护 ────────────────────────────────────────────────────────────────
   cleanup             清理空段落 / 孤儿编号
   bold-terms          加粗定义术语首次出现位置
+  comment-clean       删除所有批注（commentRange + 引用 run + comments.xml）
+  header-clean        清除所有 header 内容（可选：移除 headerReference 引用）
   footer-audit        审查所有 footer OPC parts（rId/类型/文本/textbox）
   inject              读取 JSON 计划文件一键批量注入
+  clean               执行版一键清理（accept/reject TC + 批注 + header）
 
 每个子命令均支持 -h / --help 查看详细参数。
 """,
@@ -1079,6 +1292,66 @@ Commands:
                    help="替换目标文字，如 'Rokid Hong Kong Limited'")
     p.add_argument("--out", help="输出路径，默认覆盖原文件")
 
+    # ── tc-list ───────────────────────────────────────────────────────────── #
+    p = sub.add_parser("tc-list", help="列出文档所有 Track Changes（w:ins / w:del）")
+    p.add_argument("docx")
+    p.add_argument("--author", help="只列出该作者的修订，如 'JT'")
+    p.add_argument("--fmt", choices=["json", "text"], default="json")
+
+    # ── tc-accept ─────────────────────────────────────────────────────────── #
+    p = sub.add_parser("tc-accept", help="接受所有（或指定作者的）Track Changes")
+    p.add_argument("docx")
+    p.add_argument("--author", help="只接受该作者的修订；不指定则接受全部")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="只报告，不实际修改")
+    p.add_argument("--out", help="输出路径，默认覆盖原文件")
+
+    # ── tc-reject ─────────────────────────────────────────────────────────── #
+    p = sub.add_parser("tc-reject", help="拒绝所有（或指定作者的）Track Changes")
+    p.add_argument("docx")
+    p.add_argument("--author", help="只拒绝该作者的修订；不指定则拒绝全部")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="只报告，不实际修改")
+    p.add_argument("--out", help="输出路径，默认覆盖原文件")
+
+    # ── comment-clean ─────────────────────────────────────────────────────── #
+    p = sub.add_parser("comment-clean",
+                       help="删除所有批注（commentRange* + ref runs + comments.xml）")
+    p.add_argument("docx")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="只报告批注数量，不实际修改")
+    p.add_argument("--out", help="输出路径，默认覆盖原文件")
+
+    # ── header-clean ──────────────────────────────────────────────────────── #
+    p = sub.add_parser("header-clean", help="清除所有 header 内容")
+    p.add_argument("docx")
+    p.add_argument("--remove-refs", dest="remove_refs", action="store_true",
+                   help="同时从 w:sectPr 中移除 w:headerReference 引用")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="只报告 header 数量，不实际修改")
+    p.add_argument("--out", help="输出路径，默认覆盖原文件")
+
+    # ── clean ─────────────────────────────────────────────────────────────── #
+    p = sub.add_parser("clean",
+                       help="执行版一键清理（TC accept/reject + 批注 + header）")
+    p.add_argument("docx")
+    p.add_argument("--accept", dest="accept", action="store_true", default=True,
+                   help="接受所有 TC（默认）")
+    p.add_argument("--reject", dest="reject", action="store_true", default=False,
+                   help="拒绝所有 TC（与 --accept 互斥）")
+    p.add_argument("--author", help="只处理该作者的 TC；不指定则全部处理")
+    p.add_argument("--keep-comments", dest="keep_comments", action="store_true",
+                   help="保留批注，不清理")
+    p.add_argument("--keep-headers", dest="keep_headers", action="store_true",
+                   help="保留 header，不清理")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="只显示操作计划，不实际修改")
+    p.add_argument("--backup", action="store_true",
+                   help="修改前自动创建 .bak 备份")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="跳过交互确认，直接执行")
+    p.add_argument("--out", help="输出路径，默认覆盖原文件")
+
     # ── inject ────────────────────────────────────────────────────────────── #
     p = sub.add_parser("inject", help="读取 JSON 计划文件一键执行注入")
     p.add_argument("plan", help="InjectPlan JSON 文件路径")
@@ -1099,6 +1372,9 @@ Commands:
         "table-format-brush":  cmd_table_format_brush,
         "tc-insert":    cmd_tc_insert,
         "tc-delete":    cmd_tc_delete,
+        "tc-list":      cmd_tc_list,
+        "tc-accept":    cmd_tc_accept,
+        "tc-reject":    cmd_tc_reject,
         "highlight":    cmd_highlight,
         "format-brush":       cmd_format_brush,
         "set-outline-level":  cmd_set_outline_level,
@@ -1106,6 +1382,9 @@ Commands:
         "doctor":             cmd_doctor,
         "footer-audit":       cmd_footer_audit,
         "fill-footer":        cmd_fill_footer,
+        "comment-clean":      cmd_comment_clean,
+        "header-clean":       cmd_header_clean,
+        "clean":              cmd_clean,
         "inject":             cmd_inject,
     }
     dispatch[args.command](args)

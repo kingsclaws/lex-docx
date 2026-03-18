@@ -37,10 +37,11 @@ from . import config         # noqa: F401
 from . import cleanup        # noqa: F401
 from . import inject_engine  # noqa: F401
 from . import footer_ops     # noqa: F401
+from . import tc_ops         # noqa: F401
 
 from .config import DocConfig, PRESET_JT   # noqa: F401
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __all__ = [
     # modules
     "format_brush",
@@ -49,6 +50,7 @@ __all__ = [
     "table_ops",
     "defined_terms",
     "tc_utils",
+    "tc_ops",
     "constants",
     "config",
     "cleanup",
