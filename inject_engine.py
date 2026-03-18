@@ -70,16 +70,20 @@ class TableFill:
 
 @dataclass
 class InjectResult:
-    tables: list[dict] = field(default_factory=list)      # [{table_index, filled, mode}, ...]
-    notes: list[dict] = field(default_factory=list)        # [{key, status}, ...]
-    cleanup: dict = field(default_factory=dict)            # {"empty": [...], "orphan_numbering": [...]}
-    lint: list | None = None                               # List[LintResult] or None
+    tables: list[dict] = field(default_factory=list)        # [{table_index, filled, mode}, ...]
+    notes: list[dict] = field(default_factory=list)         # [{key, status}, ...]
+    cleanup: dict = field(default_factory=dict)             # {"empty": [...], "orphan_numbering": [...]}
+    footer_replace: list[dict] = field(default_factory=list)  # [{find, replace, count, status}, ...]
+    lint: list | None = None                                # List[LintResult] or None
 
     def summary(self) -> str:
         lines = []
         total_filled = sum(t.get("filled", 0) for t in self.tables)
         lines.append(f"表格: {len(self.tables)} 张, 共填充 {total_filled} 行/格")
         lines.append(f"JT Note: 注入 {len(self.notes)} 条")
+        if self.footer_replace:
+            total_fr = sum(r.get("count", 0) for r in self.footer_replace)
+            lines.append(f"Footer 替换: {len(self.footer_replace)} 条规则, 共替换 {total_fr} 处")
         if self.cleanup:
             empty = len(self.cleanup.get("empty", []))
             orphan = len(self.cleanup.get("orphan_numbering", []))
@@ -94,25 +98,34 @@ class InjectResult:
 
 
 @dataclass
+class FooterReplace:
+    """单条 footer 查找替换规则。"""
+    find: str
+    replace: str
+
+
+@dataclass
 class InjectPlan:
     """
     注入计划。
 
-    doc_path:      源 DOCX 文件路径
-    out_path:      输出路径（None = 覆盖 doc_path）
-    target_range:  段落范围（start, end），用于 cleanup 和 lint 的 check_range
-    tables:        TableFill 列表
-    jt_notes:      {para_index_or_keyword: note_text}
-                   int key → 在该段落末尾 append
-                   str key → 在第一个包含该文字的段落末尾 append
-    auto_cleanup:  注入后自动运行 cleanup.cleanup_all()
-    run_lint:      注入后自动运行 lint.check()
+    doc_path:       源 DOCX 文件路径
+    out_path:       输出路径（None = 覆盖 doc_path）
+    target_range:   段落范围（start, end），用于 cleanup 和 lint 的 check_range
+    tables:         TableFill 列表
+    jt_notes:       {para_index_or_keyword: note_text}
+                    int key → 在该段落末尾 append
+                    str key → 在第一个包含该文字的段落末尾 append
+    footer_replace: FooterReplace 列表，对所有 footer parts 执行批量查找替换
+    auto_cleanup:   注入后自动运行 cleanup.cleanup_all()
+    run_lint:       注入后自动运行 lint.check()
     """
     doc_path: str
     out_path: str | None = None
     target_range: tuple[int, int] | None = None
     tables: list[TableFill] = field(default_factory=list)
     jt_notes: dict[int | str, str] = field(default_factory=dict)
+    footer_replace: list[FooterReplace] = field(default_factory=list)
     auto_cleanup: bool = True
     run_lint: bool = True
 
@@ -130,7 +143,7 @@ def execute(plan: InjectPlan, cfg=None) -> InjectResult:
         cfg:  DocConfig（提供 author / note_prefix 等）
     """
     from docx import Document
-    from . import table_ops, jt_note, cleanup, lint
+    from . import table_ops, jt_note, cleanup, lint, footer_ops
 
     result = InjectResult()
     doc = Document(plan.doc_path)
@@ -196,11 +209,22 @@ def execute(plan: InjectPlan, cfg=None) -> InjectResult:
         except Exception as e:
             result.notes.append({"key": key, "status": f"error: {e}"})
 
-    # ── 3. 保存 ────────────────────────────────────────────────────────────── #
+    # ── 3. Footer 替换 ─────────────────────────────────────────────────────── #
+    footer_counts: list[dict] = []
+    for fr in plan.footer_replace:
+        try:
+            n = footer_ops.fill_footer(doc, fr.find, fr.replace)
+            footer_counts.append({"find": fr.find, "replace": fr.replace, "count": n, "status": "ok"})
+        except Exception as e:
+            footer_counts.append({"find": fr.find, "replace": fr.replace, "count": 0, "status": f"error: {e}"})
+    if footer_counts:
+        result.footer_replace = footer_counts
+
+    # ── 5. 保存 ────────────────────────────────────────────────────────────── #
     out_path = plan.out_path or plan.doc_path
     doc.save(out_path)
 
-    # ── 4. 清理（在保存后重新加载，避免索引偏移影响后续操作）──────────────────── #
+    # ── 6. 清理（在保存后重新加载，避免索引偏移影响后续操作）──────────────────── #
     if plan.auto_cleanup:
         doc2 = Document(out_path)
         cr = cleanup.cleanup_all(
@@ -211,7 +235,7 @@ def execute(plan: InjectPlan, cfg=None) -> InjectResult:
         result.cleanup = cr
         doc2.save(out_path)
 
-    # ── 5. Lint ────────────────────────────────────────────────────────────── #
+    # ── 7. Lint ────────────────────────────────────────────────────────────── #
     if plan.run_lint:
         lint_cfg = cfg
         if cfg is not None and plan.target_range is not None:
