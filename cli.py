@@ -32,6 +32,8 @@ Commands:
   ── 文档维护 ───────────────────────────────────────────────────────────────────
     cleanup             清理空段落 / 孤儿编号
     bold-terms          加粗定义术语
+    doctor check        格式诊断（字体/编号/大纲/样式引用/TOC 开关，只读）
+    doctor fix          自动修复（D01/D02/D04/D05/D07/D08，支持 --dry-run）
     inject              读取 JSON 计划文件一键执行注入
 """
 from __future__ import annotations
@@ -593,6 +595,64 @@ def cmd_set_outline_level(args):
     _out({"modified": len(modified), "indices": modified})
 
 
+def cmd_doctor(args):
+    """
+    lex_docx doctor check report.docx --font 楷体 --font-size 12
+    lex_docx doctor fix   report.docx --font 楷体 --rules D01,D02,D04 --dry-run
+    """
+    from lex_docx import doctor as dr
+
+    standards = dr.Standards(
+        font=args.font or None,
+        ascii_font=args.ascii_font or None,
+        font_size=float(args.font_size) if args.font_size else None,
+        toc_levels=tuple(int(x) for x in args.toc_levels.split("-")) if args.toc_levels else (1, 3),
+    )
+    rules = [r.strip().upper() for r in args.rules.split(",")] if args.rules else None
+
+    para_range = None
+    if args.range:
+        lo, hi = [int(x.strip()) for x in args.range.split(",", 1)]
+        para_range = (lo, hi + 1)
+
+    doc = _load_doc(args.docx)
+
+    if args.doctor_cmd == "check":
+        result = dr.check(doc, standards, rules=rules, para_range=para_range)
+        _out(result.to_dict())
+
+    elif args.doctor_cmd == "fix":
+        # check 先跑一遍
+        check_result = dr.check(doc, standards, rules=rules, para_range=para_range)
+
+        exclude_range = None
+        if args.exclude_range:
+            lo, hi = [int(x.strip()) for x in args.exclude_range.split(",", 1)]
+            exclude_range = (lo, hi)
+
+        if args.backup and not args.dry_run:
+            import shutil
+            shutil.copy2(args.docx, args.docx + ".bak")
+
+        fix_result = dr.fix(
+            doc, check_result, standards,
+            rules=rules,
+            exclude_range=exclude_range,
+            dry_run=args.dry_run,
+        )
+
+        if not args.dry_run:
+            _save_doc(doc, args.out or args.docx)
+
+        _out({
+            "dry_run":   fix_result.dry_run,
+            "fixed":     fix_result.fixed,
+            "skipped":   fix_result.skipped,
+            "log":       fix_result.log,
+            "check_summary": check_result.summary(),
+        })
+
+
 def cmd_para_query(args):
     """
     lex_docx para-query report.docx --font "仿宋"
@@ -885,6 +945,36 @@ def main():
                    help="文本预览截断长度（默认 60）")
     p.add_argument("--fmt",      choices=["json", "text"], default="json")
 
+    # ── doctor ────────────────────────────────────────────────────────────── #
+    p = sub.add_parser("doctor", help="格式诊断（check）与自动修复（fix）")
+    doctor_sub = p.add_subparsers(dest="doctor_cmd", required=True)
+
+    _doctor_shared_args = lambda pp: (
+        pp.add_argument("docx"),
+        pp.add_argument("--font",        help="标准 eastAsia 字体，如 '楷体'（不指定则自动推断）"),
+        pp.add_argument("--ascii-font",  dest="ascii_font",
+                        help="标准 ascii/hAnsi 字体（不指定则同 --font）"),
+        pp.add_argument("--font-size",   dest="font_size",
+                        help="标准字号 pt，如 '12'（不指定则不检查 D02 字号）"),
+        pp.add_argument("--toc-levels",  dest="toc_levels",
+                        help="TOC 应收录的大纲级别范围，如 '1-3'（默认 1-3）"),
+        pp.add_argument("--rules",       help="只运行指定规则，逗号分隔，如 'D01,D02,D04'"),
+        pp.add_argument("--range",       help="扫描段落范围（含两端），如 '60,500'"),
+    )
+
+    p_check = doctor_sub.add_parser("check", help="诊断（只读，输出问题报告）")
+    _doctor_shared_args(p_check)
+
+    p_fix = doctor_sub.add_parser("fix", help="自动修复（默认修复所有 auto_fix 规则）")
+    _doctor_shared_args(p_fix)
+    p_fix.add_argument("--dry-run",       dest="dry_run", action="store_true",
+                       help="只打印修复计划，不实际修改")
+    p_fix.add_argument("--exclude-range", dest="exclude_range",
+                       help="排除段落范围（含两端），如 '0,59'（前言/目录区）")
+    p_fix.add_argument("--backup",        action="store_true",
+                       help="修复前自动创建 .bak 备份")
+    p_fix.add_argument("--out",           help="输出路径（默认覆盖原文件）")
+
     # ── inject ────────────────────────────────────────────────────────────── #
     p = sub.add_parser("inject", help="读取 JSON 计划文件一键执行注入")
     p.add_argument("plan", help="InjectPlan JSON 文件路径")
@@ -909,6 +999,7 @@ def main():
         "format-brush":       cmd_format_brush,
         "set-outline-level":  cmd_set_outline_level,
         "para-query":         cmd_para_query,
+        "doctor":             cmd_doctor,
         "inject":             cmd_inject,
     }
     dispatch[args.command](args)
