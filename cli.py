@@ -7,19 +7,31 @@ cli.py — lex_docx 命令行入口
     lex_docx <command> [options]
 
 Commands:
-    lint          检查 DOCX 格式（输出 JSON 或文本）
-    extract       提取表格数据（输出 JSON）
-    fill-table    按列映射填充表格
-    fill-kv       填充 KV 表（基本信息类）
-    format-table  统一表格格式
-    cleanup       清理空段落 / 孤儿编号
-    bold-terms    加粗定义术语
-    copy-table    跨文档表格复制（含格式）
-    tc-insert     段落级 TC INS（在指定段落插入文字）
-    tc-delete     段落级 TC DEL（将指定段落标记为删除）
-    highlight     批量标黄段落范围
-    format-brush  格式刷（从参考段落复制格式到目标段落）
-    inject        读取 JSON 计划文件一键执行注入
+  ── 检查 ──────────────────────────────────────────────────────────────────────
+    lint                检查 DOCX 格式（输出 JSON 或文本；支持 Profile+Selector 模式）
+
+  ── 数据填充 ───────────────────────────────────────────────────────────────────
+    extract             提取表格数据（输出 JSON）
+    fill-table          按列映射填充表格
+    fill-kv             填充 KV 表（基本信息类）
+
+  ── 表格操作 ───────────────────────────────────────────────────────────────────
+    format-table        统一表格格式（底色/边框/列宽/对齐）
+    copy-table          跨文档表格复制（含格式）
+    table-inspect       读取表格完整格式信息（底色/边框/列宽/字体/风格检测）
+    table-format-brush  表格格式刷（从参考表格复制格式到目标表格）
+
+  ── 段落/Track Changes ─────────────────────────────────────────────────────────
+    tc-insert           段落级 TC INS（在指定段落插入文字）
+    tc-delete           段落级 TC DEL（将指定段落标记为删除）
+    highlight           批量高亮段落范围
+    format-brush        格式刷（从参考段落复制格式到目标段落）
+    set-outline-level   设置段落大纲级别（w:outlineLvl，独立于 Heading 样式）
+
+  ── 文档维护 ───────────────────────────────────────────────────────────────────
+    cleanup             清理空段落 / 孤儿编号
+    bold-terms          加粗定义术语
+    inject              读取 JSON 计划文件一键执行注入
 """
 from __future__ import annotations
 
