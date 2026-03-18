@@ -768,12 +768,50 @@ def cmd_inject(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="lex_docx",
-        description="lex_docx — DOCX 自动化工具库 CLI",
+        usage="lex_docx <command> [options]  (lex_docx --help 查看全部命令)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""\
+lex_docx — DOCX 自动化工具库 CLI
+
+Commands:
+  ── 检查 / 诊断 ──────────────────────────────────────────────────────────────
+  lint                检查 DOCX 内容格式（拼写/表格/标注，支持 Profile+Selector）
+  doctor check        格式结构诊断（字体/大纲/编号/样式引用/TOC 开关，只读）
+  doctor fix          自动修复诊断结果（支持 --dry-run / --backup）
+
+  ── 数据填充 ────────────────────────────────────────────────────────────────
+  extract             提取表格数据（输出 JSON 或 CSV）
+  fill-table          按列映射批量填充表格行
+  fill-kv             填充 KV 表（基本信息类二列/四列布局）
+
+  ── 表格操作 ────────────────────────────────────────────────────────────────
+  format-table        统一表格格式（底色/边框/列宽/对齐）
+  copy-table          跨文档表格复制（含完整格式）
+  table-inspect       读取表格完整格式信息（底色/边框/列宽/字体/风格检测）
+  table-format-brush  表格格式刷（从参考表格复制格式到目标表格）
+
+  ── 段落 / Track Changes ────────────────────────────────────────────────────
+  tc-insert           段落级 TC INS（在指定段落插入带标记文字）
+  tc-delete           段落级 TC DEL（将指定段落标记为删除）
+  highlight           批量高亮段落范围
+  format-brush        段落格式刷（复制缩进/间距/样式/大纲级别等）
+  set-outline-level   设置段落大纲级别（w:outlineLvl，独立于 Heading 样式）
+  para-query          全文格式检索（按字体/样式/大纲级别/字号/粗斜体等过滤）
+
+  ── 文档维护 ────────────────────────────────────────────────────────────────
+  cleanup             清理空段落 / 孤儿编号
+  bold-terms          加粗定义术语首次出现位置
+  inject              读取 JSON 计划文件一键批量注入
+
+每个子命令均支持 -h / --help 查看详细参数。
+""",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                metavar="<command>",
+                                help=argparse.SUPPRESS)
 
     # ── lint ──────────────────────────────────────────────────────────────── #
-    p = sub.add_parser("lint", help="检查 DOCX 格式")
+    p = sub.add_parser("lint", help="检查 DOCX 内容格式（支持 Profile+Selector 模式）")
     p.add_argument("docx")
     p.add_argument("--cfg", help="DocConfig JSON 文件路径（经典模式）")
     p.add_argument("--rules", help="逗号分隔的规则名，默认全部")
