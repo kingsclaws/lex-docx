@@ -133,6 +133,17 @@ def _run_font_size(run_el) -> float | None:
 # 段落属性提取                                                                  #
 # --------------------------------------------------------------------------- #
 
+def _para_jc(para) -> str | None:
+    """读取段落 w:jc 对齐方式值，如 'center'/'both'/'left'/'right'，None 表示未显式设置。"""
+    pPr = para._element.find(qn("w:pPr"))
+    if pPr is None:
+        return None
+    jc_el = pPr.find(qn("w:jc"))
+    if jc_el is None:
+        return None
+    return jc_el.get(qn("w:val"))
+
+
 def _para_outline_level(para) -> int | None:
     """读取 w:outlineLvl，转换为用户级别 1-9，None 表示未设置（正文）。"""
     pPr = para._element.find(qn("w:pPr"))
@@ -160,6 +171,7 @@ def _collect_para_attrs(para, style_map: dict) -> dict:
     """
     style_name = _para_style_name(para)
     outline_level = _para_outline_level(para)
+    jc = _para_jc(para)
 
     # 收集所有 run 的显式属性
     run_fonts_ea: set[str] = set()
@@ -194,6 +206,7 @@ def _collect_para_attrs(para, style_map: dict) -> dict:
     return {
         "style":          style_name,
         "outline_level":  outline_level,
+        "jc":             jc,
         # 字体：run 显式值（可能多个）+ 样式继承值
         "font_eastasia":  sorted(run_fonts_ea) or ([style_attrs.get("font_eastasia")] if style_attrs.get("font_eastasia") else []),
         "font_ascii":     sorted(run_fonts_ascii) or ([style_attrs.get("font_ascii")] if style_attrs.get("font_ascii") else []),
@@ -218,6 +231,7 @@ def query(
     bold: bool | None = None,
     italic: bool | None = None,
     color: str | None = None,
+    jc: str | None = None,
     para_range: tuple[int, int] | None = None,
     text_preview_len: int = 60,
 ) -> list[dict]:
@@ -233,6 +247,7 @@ def query(
         bold:            True=只要有粗体 run，False=无粗体
         italic:          True=只要有斜体 run，False=无斜体
         color:           字体颜色十六进制，如 "FF0000"（不区分大小写）
+        jc:              对齐方式，如 "center"/"both"/"left"/"right"（精确匹配 w:jc w:val）
         para_range:      扫描范围 (start, end)，默认全文
         text_preview_len: 文本预览截断长度
 
@@ -306,6 +321,12 @@ def query(
                 continue
             matched_on.append("color")
 
+        # -- jc filter
+        if jc is not None:
+            if attrs["jc"] != jc:
+                continue
+            matched_on.append("jc")
+
         text = para.text
         results.append({
             "index":         i,
@@ -316,6 +337,7 @@ def query(
             "font_size":     attrs["font_size"],
             "bold":          attrs["bold"],
             "italic":        attrs["italic"],
+            "jc":            attrs["jc"],
             "colors":        attrs["colors"],
             "text":          text[:text_preview_len] + ("…" if len(text) > text_preview_len else ""),
             "matched_on":    matched_on,
