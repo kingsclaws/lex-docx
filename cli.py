@@ -542,6 +542,44 @@ def cmd_format_brush(args):
     _out({"ok": True, "modified": modified})
 
 
+def cmd_set_outline_level(args):
+    """
+    lex_docx set-outline-level report.docx --para 5 --level 2
+    lex_docx set-outline-level report.docx --range 10,20 --level 2
+    lex_docx set-outline-level report.docx --style "自定义标题" --level 1
+    lex_docx set-outline-level report.docx --range 0,200 --style "自定义标题" --level 1
+    lex_docx set-outline-level report.docx --para 5 --level none  # 清除大纲级别
+    """
+    from lex_docx import format_brush
+
+    doc = _load_doc(args.docx)
+    paras = doc.paragraphs
+
+    # 确定目标段落索引
+    if args.para is not None:
+        indices: list[int] = [args.para]
+    elif args.range:
+        lo, hi = [int(x.strip()) for x in args.range.split(",", 1)]
+        indices = list(range(lo, hi + 1))
+    else:
+        indices = list(range(len(paras)))
+
+    # 按 style 过滤
+    if args.style:
+        indices = [i for i in indices
+                   if i < len(paras) and paras[i].style and paras[i].style.name == args.style]
+
+    # 解析 level：整数 1-9 或 "none"/0 表示清除
+    if args.level.lower() == "none":
+        level = None
+    else:
+        level = int(args.level)
+
+    modified = format_brush.set_outline_level(doc, indices, level)
+    _save_doc(doc, args.out or args.docx)
+    _out({"modified": len(modified), "indices": modified})
+
+
 def cmd_inject(args):
     """
     lex_docx inject plan.json [--cfg config.json] [--out out.docx]
@@ -739,6 +777,17 @@ def main():
     p.add_argument("--copy", help="复制项，逗号分隔，如 'indent,spacing,style'（默认全部）")
     p.add_argument("--out")
 
+    # ── set-outline-level ─────────────────────────────────────────────────── #
+    p = sub.add_parser("set-outline-level",
+                       help="设置段落大纲级别（w:outlineLvl，独立于 Heading 样式）")
+    p.add_argument("docx")
+    p.add_argument("--level", required=True,
+                   help="大纲级别 1-9，或 none/0 表示清除（变为正文）")
+    p.add_argument("--para",  type=int, help="单个段落索引")
+    p.add_argument("--range", help="段落范围（含两端），如 '10,20'")
+    p.add_argument("--style", help="按样式名过滤，如 '自定义标题'")
+    p.add_argument("--out",   help="输出路径，默认覆盖原文件")
+
     # ── inject ────────────────────────────────────────────────────────────── #
     p = sub.add_parser("inject", help="读取 JSON 计划文件一键执行注入")
     p.add_argument("plan", help="InjectPlan JSON 文件路径")
@@ -760,8 +809,9 @@ def main():
         "tc-insert":    cmd_tc_insert,
         "tc-delete":    cmd_tc_delete,
         "highlight":    cmd_highlight,
-        "format-brush": cmd_format_brush,
-        "inject":       cmd_inject,
+        "format-brush":       cmd_format_brush,
+        "set-outline-level":  cmd_set_outline_level,
+        "inject":             cmd_inject,
     }
     dispatch[args.command](args)
 

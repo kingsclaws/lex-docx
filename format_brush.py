@@ -196,6 +196,62 @@ def _el_to_str(el) -> str:
     return etree.tostring(el, encoding="unicode")
 
 
+def set_outline_level(
+    doc,
+    target_indices: Sequence[int],
+    level: int | None,
+) -> list[int]:
+    """
+    直接设置段落的 w:outlineLvl 值。
+
+    Args:
+        doc:            python-docx Document 对象
+        target_indices: 目标段落索引列表
+        level:          1–9（对应 OOXML 0–8），或 None / 0 = 清除（变为正文级别）
+
+    Returns:
+        实际修改的段落索引列表
+
+    说明：
+        - w:outlineLvl 独立于 Heading 1/2/3 样式，控制 Word 导航窗格中的大纲层级
+        - val=0 → 大纲1级，val=8 → 大纲9级，val=9 / 无此元素 → 正文（不出现在大纲）
+        - 常见用途：自定义标题样式希望出现在导航窗格时，手动设置此值
+    """
+    tag = qn("w:outlineLvl")
+    paras = doc.paragraphs
+
+    # 转换用户级别（1-9）到 OOXML 值（0-8），None/0 表示清除
+    if level is None or level <= 0:
+        ooxml_val = None   # 清除模式
+    else:
+        ooxml_val = str(min(level - 1, 8))
+
+    modified = []
+    for idx in target_indices:
+        if idx < 0 or idx >= len(paras):
+            continue
+        para = paras[idx]
+        pPr = para._element.get_or_add_pPr()
+        existing = pPr.find(tag)
+
+        if ooxml_val is None:
+            # 清除大纲级别
+            if existing is not None:
+                pPr.remove(existing)
+                modified.append(idx)
+        else:
+            if existing is not None:
+                if existing.get(qn("w:val")) == ooxml_val:
+                    continue   # 已是目标值，跳过
+                pPr.remove(existing)
+            from lxml import etree
+            el = etree.SubElement(pPr, tag)
+            el.set(qn("w:val"), ooxml_val)
+            modified.append(idx)
+
+    return modified
+
+
 def extract_style_rPr_map(doc) -> dict:
     """
     从文档 styles.xml 提取每个 style 的 w:rPr，返回 {style_name: rPr_element}。
