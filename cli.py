@@ -14,6 +14,7 @@ Commands:
     extract             提取表格数据（输出 JSON）
     fill-table          按列映射填充表格
     fill-kv             填充 KV 表（基本信息类）
+    fill-footer         批量替换所有 footer parts 中的文本（含 textbox）
 
   ── 表格操作 ───────────────────────────────────────────────────────────────────
     format-table        统一表格格式（底色/边框/列宽/对齐）
@@ -27,12 +28,13 @@ Commands:
     highlight           批量高亮段落范围
     format-brush        格式刷（从参考段落复制格式到目标段落）
     set-outline-level   设置段落大纲级别（w:outlineLvl，独立于 Heading 样式）
-    para-query          全文格式检索（按字体/样式/大纲级别/字号/粗斜体等过滤段落）
+    para-query          全文格式检索（按字体/样式/大纲级别/字号/粗斜体/对齐等过滤段落）
 
   ── 文档维护 ───────────────────────────────────────────────────────────────────
     cleanup             清理空段落 / 孤儿编号
     bold-terms          加粗定义术语
-    doctor check        格式诊断（字体/编号/大纲/样式引用/TOC 开关，只读）
+    footer-audit        审查所有 footer OPC parts（rId/类型/文本/textbox）
+    doctor check        格式诊断（字体/编号/大纲/样式引用/TOC/footer，只读）
     doctor fix          自动修复（D01/D02/D04/D05/D07/D08，支持 --dry-run）
     inject              读取 JSON 计划文件一键执行注入
 """
@@ -552,6 +554,7 @@ def cmd_format_brush(args):
         target_indices=indices,
         reference_index=args.ref,
         copy=copy,
+        skip_if_jc=args.skip_if_jc or None,
     )
     _save_doc(doc, args.out or args.docx)
     _out({"ok": True, "modified": modified})
@@ -602,11 +605,16 @@ def cmd_doctor(args):
     """
     from lex_docx import doctor as dr
 
+    footer_blacklist = None
+    if getattr(args, "footer_blacklist", None):
+        footer_blacklist = [kw.strip() for kw in args.footer_blacklist.split(",") if kw.strip()]
+
     standards = dr.Standards(
         font=args.font or None,
         ascii_font=args.ascii_font or None,
         font_size=float(args.font_size) if args.font_size else None,
         toc_levels=tuple(int(x) for x in args.toc_levels.split("-")) if args.toc_levels else (1, 3),
+        footer_blacklist=footer_blacklist,
     )
     rules = [r.strip().upper() for r in args.rules.split(",")] if args.rules else None
 
@@ -696,6 +704,7 @@ def cmd_para_query(args):
         bold=bold,
         italic=italic,
         color=args.color,
+        jc=args.jc or None,
         para_range=para_range,
         text_preview_len=args.preview_len,
     )
@@ -750,15 +759,49 @@ def cmd_inject(args):
             jt_notes[k] = v
 
     tables = [inject_engine.TableFill(**t) for t in raw.pop("tables", [])]
+    footer_replace = [
+        inject_engine.FooterReplace(**fr) for fr in raw.pop("footer_replace", [])
+    ]
 
-    plan = inject_engine.InjectPlan(tables=tables, jt_notes=jt_notes, **raw)
+    plan = inject_engine.InjectPlan(tables=tables, jt_notes=jt_notes,
+                                    footer_replace=footer_replace, **raw)
     result = inject_engine.execute(plan, cfg)
     _out({
-        "summary": result.summary(),
-        "tables":  result.tables,
-        "notes":   result.notes,
-        "cleanup": result.cleanup,
+        "summary":        result.summary(),
+        "tables":         result.tables,
+        "notes":          result.notes,
+        "footer_replace": result.footer_replace,
+        "cleanup":        result.cleanup,
     })
+
+
+def cmd_footer_audit(args):
+    """
+    lex_docx footer-audit report.docx [--fmt json|text]
+    """
+    from lex_docx import footer_ops
+    doc = _load_doc(args.docx)
+    results = footer_ops.audit_footers(doc)
+
+    if args.fmt == "text":
+        for r in results:
+            tb = "含textbox" if r["has_textbox"] else "无textbox"
+            print(f"[{r['rId']}] {r['footer_type']:8s}  {tb}  part={r['part_name']}")
+            print(f"       text={r['text'][:80]!r}")
+    else:
+        _out(results)
+
+
+def cmd_fill_footer(args):
+    """
+    lex_docx fill-footer report.docx --replace "Auspicious Linkage" --with "Rokid HK Ltd"
+                [--out output.docx]
+    """
+    from lex_docx import footer_ops
+    doc = _load_doc(args.docx)
+    count = footer_ops.fill_footer(doc, find=args.replace, replace=args.with_text)
+    _save_doc(doc, args.out or args.docx)
+    _out({"ok": True, "replaced": count, "find": args.replace, "replace": args.with_text})
 
 
 # =========================================================================== #
@@ -783,6 +826,7 @@ Commands:
   extract             提取表格数据（输出 JSON 或 CSV）
   fill-table          按列映射批量填充表格行
   fill-kv             填充 KV 表（基本信息类二列/四列布局）
+  fill-footer         批量替换所有 footer parts 中的文本（含 textbox）
 
   ── 表格操作 ────────────────────────────────────────────────────────────────
   format-table        统一表格格式（底色/边框/列宽/对齐）
@@ -801,6 +845,7 @@ Commands:
   ── 文档维护 ────────────────────────────────────────────────────────────────
   cleanup             清理空段落 / 孤儿编号
   bold-terms          加粗定义术语首次出现位置
+  footer-audit        审查所有 footer OPC parts（rId/类型/文本/textbox）
   inject              读取 JSON 计划文件一键批量注入
 
 每个子命令均支持 -h / --help 查看详细参数。
@@ -946,6 +991,8 @@ Commands:
     p.add_argument("--target", help="目标段落索引，逗号分隔，如 '177,178,180'")
     p.add_argument("--range", help="目标段落范围（含两端），如 '175,185'")
     p.add_argument("--copy", help="复制项，逗号分隔，如 'indent,spacing,style'（默认全部）")
+    p.add_argument("--skip-if-jc", dest="skip_if_jc",
+                   help="跳过当前对齐方式等于此值的段落，如 'center'")
     p.add_argument("--out")
 
     # ── set-outline-level ─────────────────────────────────────────────────── #
@@ -978,6 +1025,7 @@ Commands:
     p.add_argument("--no-italic", dest="no_italic", action="store_true", default=False,
                    help="只返回不含斜体 run 的段落")
     p.add_argument("--color",    help="字体颜色十六进制，如 'FF0000'")
+    p.add_argument("--jc",       help="对齐方式过滤，如 'center'/'both'/'left'/'right'")
     p.add_argument("--range",    help="扫描范围（含两端），如 '0,200'")
     p.add_argument("--preview-len", dest="preview_len", type=int, default=60,
                    help="文本预览截断长度（默认 60）")
@@ -996,6 +1044,8 @@ Commands:
                         help="标准字号 pt，如 '12'（不指定则不检查 D02 字号）"),
         pp.add_argument("--toc-levels",  dest="toc_levels",
                         help="TOC 应收录的大纲级别范围，如 '1-3'（默认 1-3）"),
+        pp.add_argument("--footer-blacklist", dest="footer_blacklist",
+                        help="footer 关键词黑名单，逗号分隔，如 'Auspicious,Template'（D09）"),
         pp.add_argument("--rules",       help="只运行指定规则，逗号分隔，如 'D01,D02,D04'"),
         pp.add_argument("--range",       help="扫描段落范围（含两端），如 '60,500'"),
     )
@@ -1012,6 +1062,22 @@ Commands:
     p_fix.add_argument("--backup",        action="store_true",
                        help="修复前自动创建 .bak 备份")
     p_fix.add_argument("--out",           help="输出路径（默认覆盖原文件）")
+
+    # ── footer-audit ──────────────────────────────────────────────────────── #
+    p = sub.add_parser("footer-audit",
+                       help="审查所有 footer OPC parts（rId/类型/文本/textbox 检测）")
+    p.add_argument("docx")
+    p.add_argument("--fmt", choices=["json", "text"], default="json")
+
+    # ── fill-footer ───────────────────────────────────────────────────────── #
+    p = sub.add_parser("fill-footer",
+                       help="批量替换所有 footer parts 中的文本（含 textbox）")
+    p.add_argument("docx")
+    p.add_argument("--replace", required=True, dest="replace",
+                   help="要查找的原始文字，如 'Auspicious Linkage'")
+    p.add_argument("--with",    required=True, dest="with_text",
+                   help="替换目标文字，如 'Rokid Hong Kong Limited'")
+    p.add_argument("--out", help="输出路径，默认覆盖原文件")
 
     # ── inject ────────────────────────────────────────────────────────────── #
     p = sub.add_parser("inject", help="读取 JSON 计划文件一键执行注入")
@@ -1038,6 +1104,8 @@ Commands:
         "set-outline-level":  cmd_set_outline_level,
         "para-query":         cmd_para_query,
         "doctor":             cmd_doctor,
+        "footer-audit":       cmd_footer_audit,
+        "fill-footer":        cmd_fill_footer,
         "inject":             cmd_inject,
     }
     dispatch[args.command](args)
