@@ -36,6 +36,7 @@ from . import constants      # noqa: F401
 from . import config         # noqa: F401
 from . import cleanup        # noqa: F401
 from . import inject_engine  # noqa: F401
+from . import footer_ops     # noqa: F401
 
 from .config import DocConfig, PRESET_JT   # noqa: F401
 
@@ -52,6 +53,7 @@ __all__ = [
     "config",
     "cleanup",
     "inject_engine",
+    "footer_ops",
     # top-level convenience
     "DocConfig",
     "PRESET_JT",
