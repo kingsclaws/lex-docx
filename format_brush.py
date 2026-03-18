@@ -26,11 +26,23 @@ _COPY_MAP = {
 # 主接口                                                                        #
 # --------------------------------------------------------------------------- #
 
+def _get_para_jc(para) -> str | None:
+    """读取段落当前 w:jc 值（如 'center'/'both'），None 表示未显式设置。"""
+    pPr = para._element.find(qn("w:pPr"))
+    if pPr is None:
+        return None
+    jc_el = pPr.find(qn("w:jc"))
+    if jc_el is None:
+        return None
+    return jc_el.get(qn("w:val"))
+
+
 def apply(
     doc,
     target_indices: Sequence[int],
     reference_index: int,
     copy: list[str] | None = None,
+    skip_if_jc: str | None = None,
 ) -> list[int]:
     """
     从 reference_index 段落复制格式到 target_indices 中的各段落。
@@ -42,6 +54,7 @@ def apply(
         copy:             选择性复制，支持 "indent" / "spacing" / "style" /
                           "numPr" / "jc" / "outlineLvl"
                           默认 ["indent", "spacing", "style"]
+        skip_if_jc:       跳过当前 w:jc 等于此值的段落，如 "center"（防止误覆盖封面标题等）
 
     Returns:
         实际修改的段落索引列表
@@ -61,6 +74,8 @@ def apply(
         if idx < 0 or idx >= len(paras):
             continue
         tgt_para = paras[idx]
+        if skip_if_jc is not None and _get_para_jc(tgt_para) == skip_if_jc:
+            continue
         tgt_pPr = tgt_para._element.get_or_add_pPr()
 
         for attr in copy:
