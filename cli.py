@@ -27,6 +27,7 @@ Commands:
     highlight           批量高亮段落范围
     format-brush        格式刷（从参考段落复制格式到目标段落）
     set-outline-level   设置段落大纲级别（w:outlineLvl，独立于 Heading 样式）
+    para-query          全文格式检索（按字体/样式/大纲级别/字号/粗斜体等过滤段落）
 
   ── 文档维护 ───────────────────────────────────────────────────────────────────
     cleanup             清理空段落 / 孤儿编号
@@ -592,6 +593,66 @@ def cmd_set_outline_level(args):
     _out({"modified": len(modified), "indices": modified})
 
 
+def cmd_para_query(args):
+    """
+    lex_docx para-query report.docx --font "仿宋"
+    lex_docx para-query report.docx --outline-level 1,2
+    lex_docx para-query report.docx --style "Heading 1" "Heading 2"
+    lex_docx para-query report.docx --font "仿宋" --font-size 12
+    lex_docx para-query report.docx --bold
+    lex_docx para-query report.docx --range 0,200 --font "仿宋"
+    """
+    from lex_docx import para_query
+
+    doc = _load_doc(args.docx)
+
+    outline_level = None
+    if args.outline_level:
+        outline_level = [int(x.strip()) for x in args.outline_level.split(",")]
+
+    para_range = None
+    if args.range:
+        lo, hi = [int(x.strip()) for x in args.range.split(",", 1)]
+        para_range = (lo, hi + 1)
+
+    bold = None
+    if args.bold:
+        bold = True
+    elif args.no_bold:
+        bold = False
+
+    italic = None
+    if args.italic:
+        italic = True
+    elif args.no_italic:
+        italic = False
+
+    results = para_query.query(
+        doc,
+        style=args.style or None,
+        font=args.font,
+        font_size=float(args.font_size) if args.font_size else None,
+        outline_level=outline_level,
+        bold=bold,
+        italic=italic,
+        color=args.color,
+        para_range=para_range,
+        text_preview_len=args.preview_len,
+    )
+
+    if args.fmt == "text":
+        for r in results:
+            ol = f"大纲{r['outline_level']}级" if r["outline_level"] else ""
+            font_str = "/".join(r["font_eastasia"] or r["font_ascii"] or [])
+            sz_str = "/".join(str(s) for s in r["font_size"]) + "pt" if r["font_size"] else ""
+            flags = " ".join(f for f, v in [("粗", r["bold"]), ("斜", r["italic"])] if v)
+            meta = "  ".join(x for x in [r["style"], ol, font_str, sz_str, flags] if x)
+            print(f"[{r['index']:>4}] {meta}")
+            print(f"       {r['text']}")
+    else:
+        _out(results)
+
+
 def cmd_inject(args):
     """
     lex_docx inject plan.json [--cfg config.json] [--out out.docx]
@@ -800,6 +861,30 @@ def main():
     p.add_argument("--style", help="按样式名过滤，如 '自定义标题'")
     p.add_argument("--out",   help="输出路径，默认覆盖原文件")
 
+    # ── para-query ────────────────────────────────────────────────────────── #
+    p = sub.add_parser("para-query",
+                       help="全文格式检索（按字体/样式/大纲级别/字号/粗斜体等过滤段落）")
+    p.add_argument("docx")
+    p.add_argument("--style",    nargs="+", help="段落样式名（可多个，OR 匹配），如 --style 'Heading 1' '标题1'")
+    p.add_argument("--font",     help="字体名（部分匹配），如 '仿宋'")
+    p.add_argument("--font-size", dest="font_size",
+                   help="字号（pt），如 '12'")
+    p.add_argument("--outline-level", dest="outline_level",
+                   help="大纲级别，逗号分隔，如 '1,2'")
+    p.add_argument("--bold",     action="store_true", default=False,
+                   help="只返回含粗体 run 的段落")
+    p.add_argument("--no-bold",  dest="no_bold", action="store_true", default=False,
+                   help="只返回不含粗体 run 的段落")
+    p.add_argument("--italic",   action="store_true", default=False,
+                   help="只返回含斜体 run 的段落")
+    p.add_argument("--no-italic", dest="no_italic", action="store_true", default=False,
+                   help="只返回不含斜体 run 的段落")
+    p.add_argument("--color",    help="字体颜色十六进制，如 'FF0000'")
+    p.add_argument("--range",    help="扫描范围（含两端），如 '0,200'")
+    p.add_argument("--preview-len", dest="preview_len", type=int, default=60,
+                   help="文本预览截断长度（默认 60）")
+    p.add_argument("--fmt",      choices=["json", "text"], default="json")
+
     # ── inject ────────────────────────────────────────────────────────────── #
     p = sub.add_parser("inject", help="读取 JSON 计划文件一键执行注入")
     p.add_argument("plan", help="InjectPlan JSON 文件路径")
@@ -823,6 +908,7 @@ def main():
         "highlight":    cmd_highlight,
         "format-brush":       cmd_format_brush,
         "set-outline-level":  cmd_set_outline_level,
+        "para-query":         cmd_para_query,
         "inject":             cmd_inject,
     }
     dispatch[args.command](args)
