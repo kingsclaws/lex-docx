@@ -38,6 +38,7 @@ class Standards:
     font_size: float | None = None    # 标准字号 pt（None = 不检查字号）
     toc_levels: tuple[int, int] = (1, 3)  # TOC 应收录的大纲级别范围
     double_num_patterns: list[str] | None = None  # 自定义手动编号正则（None = 用内置）
+    footer_blacklist: list[str] | None = None     # footer 关键词黑名单（如 ["Auspicious"]）
 
 
 @dataclass
@@ -544,11 +545,53 @@ def _check_d08(doc, standards: Standards, style_info: dict,
     return issues
 
 
+def _check_d09(doc, standards: Standards) -> list[Issue]:
+    """
+    D09: Footer 内容一致性检查。
+    - 奇偶页/首页 footer 文本不一致时报 warning
+    - footer 文本含关键词黑名单时报 warning（每个关键词一条）
+    """
+    from .footer_ops import audit_footers
+
+    issues: list[Issue] = []
+    parts = audit_footers(doc)
+    if not parts:
+        return issues
+
+    # 一致性检查：去除空 footer 后，比较所有非空 footer 的文本
+    non_empty = [p for p in parts if p["text"].strip()]
+    if len(non_empty) > 1:
+        texts = {p["text"].strip() for p in non_empty}
+        if len(texts) > 1:
+            summary = "; ".join(
+                f'{p["footer_type"]}={p["text"][:40]!r}' for p in non_empty
+            )
+            issues.append(Issue(
+                rule="D09", severity="warning", para=-1, run=None,
+                detail=f"footer 内容不一致（共 {len(non_empty)} 个非空 footer）: {summary}",
+                auto_fix=False,
+            ))
+
+    # 关键词黑名单检查
+    if standards.footer_blacklist:
+        all_text = " ".join(p["text"] for p in parts)
+        for kw in standards.footer_blacklist:
+            if kw in all_text:
+                offenders = [p["footer_type"] for p in parts if kw in p["text"]]
+                issues.append(Issue(
+                    rule="D09", severity="warning", para=-1, run=None,
+                    detail=f"footer 含黑名单关键词 {kw!r}（出现于: {offenders}）",
+                    auto_fix=False,
+                ))
+
+    return issues
+
+
 # --------------------------------------------------------------------------- #
 # 主检查入口                                                                    #
 # --------------------------------------------------------------------------- #
 
-ALL_RULES = ["D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08"]
+ALL_RULES = ["D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08", "D09"]
 AUTO_FIX_RULES = ["D01", "D02", "D04", "D05", "D07", "D08"]
 
 
@@ -601,6 +644,8 @@ def check(
         issues += _check_d07(doc)
     if "D08" in rules:
         issues += _check_d08(doc, effective_standards, style_info, para_range)
+    if "D09" in rules:
+        issues += _check_d09(doc, effective_standards)
 
     return CheckResult(issues=issues, inferred_font=inferred_font)
 
