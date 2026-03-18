@@ -1,0 +1,55 @@
+# .github/workflows/notify-openclaw.yml
+#
+# 将 GitHub 事件推送到 OpenClaw webhook，由 project-nexus 路由到对应项目 session。
+#
+# 安装步骤：
+#   1. 复制此文件到目标 repo 的 .github/workflows/notify-openclaw.yml
+#   2. 在 repo Settings → Secrets and variables → Actions 中添加：
+#      - OPENCLAW_HOOKS_URL : OpenClaw 地址，如 http://your-host:18789
+#      - OPENCLAW_HOOKS_TOKEN : openclaw.json 中的 hooks.token 值
+#   3. 确认目标 repo 已通过 `nexus create-project-team` 与项目关联
+#      （project_repo_team_map 表中有对应记录）
+#
+# 触发事件覆盖：issues / issue_comment / push(main) / pull_request
+# ──────────────────────────────────────────────────────────────────
+
+name: Notify OpenClaw
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened]
+  issue_comment:
+    types: [created]
+  push:
+    branches: [main, master]
+  pull_request:
+    types: [opened, synchronize, closed]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    # 跳过 bot 触发（避免循环）
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - name: POST to OpenClaw
+        env:
+          OPENCLAW_URL: ${{ secrets.OPENCLAW_HOOKS_URL }}
+          OPENCLAW_TOKEN: ${{ secrets.OPENCLAW_HOOKS_TOKEN }}
+        run: |
+          # 将 event_name + 完整 event payload 包装成 transform 期望的 JSON
+          PAYLOAD=$(jq -n \
+            --arg event_name "${{ github.event_name }}" \
+            --argjson event '${{ toJSON(github.event) }}' \
+            '{event_name: $event_name, event: $event}')
+
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${OPENCLAW_URL}/hooks/github" \
+            -H "Authorization: Bearer ${OPENCLAW_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}")
+
+          echo "OpenClaw response: ${HTTP_STATUS}"
+          # 2xx = 成功；其他不阻断 CI
+          if [[ "${HTTP_STATUS}" != 2* ]]; then
+            echo "::warning::OpenClaw hook returned ${HTTP_STATUS}"
+          fi
